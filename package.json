@@ -1,0 +1,25 @@
+{
+  "name": "phantom-cursor",
+  "version": "1.0.0",
+  "description": "Phantom Cursor – A collaborative overlay for pair programming with real-time remote cursor sharing.",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "keywords": [
+    "electron",
+    "cursor",
+    "collaboration",
+    "pair-programming",
+    "overlay"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "electron": "^35.0.0"
+  },
+  "dependencies": {
+    "koffi": "^2.16.1",
+    "ws": "^8.18.0"
+  }
+}

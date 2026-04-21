@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Phantom Cursor</title>
+  <link rel="stylesheet" href="style.css" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
+</head>
+
+<body>
+  <!-- ── Transparent Canvas Overlay ─────────────────────── -->
+  <div id="canvas-overlay">
+    <!-- Screen mirror (displayed on peer when host shares screen) -->
+    <div id="screen-mirror-container">
+      <img id="screen-mirror" alt="Host Screen" />
+      <div id="live-badge">
+        <span class="live-dot"></span>
+        <span>LIVE</span>
+      </div>
+    </div>
+
+    <!-- Local cursor (blue glow) -->
+    <div id="local-cursor" class="cursor-dot local">
+      <div class="cursor-ring"></div>
+      <div class="cursor-core"></div>
+      <span class="cursor-label">You</span>
+    </div>
+
+    <!-- Remote cursor (red glow) -->
+    <div id="remote-cursor" class="cursor-dot remote">
+      <div class="cursor-ring"></div>
+      <div class="cursor-core"></div>
+      <span class="cursor-label">Peer</span>
+    </div>
+  </div>
+
+  <!-- ── Neon Side Panel ────────────────────────────────── -->
+  <aside id="side-panel">
+    <!-- Draggable title bar area -->
+    <div id="panel-header">
+      <div class="logo-area">
+        <div class="logo-icon">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+            <path d="M5 3L19 12L5 21V3Z" fill="url(#grad1)" opacity="0.9" />
+            <defs>
+              <linearGradient id="grad1" x1="5" y1="3" x2="19" y2="21">
+                <stop offset="0%" stop-color="#00d4ff" />
+                <stop offset="100%" stop-color="#7b2ff7" />
+              </linearGradient>
+            </defs>
+          </svg>
+        </div>
+        <h1>Phantom<span class="accent">Cursor</span></h1>
+      </div>
+      <div class="window-controls">
+        <button id="btn-minimize" class="win-btn" title="Minimize">
+          <svg width="12" height="12" viewBox="0 0 12 12">
+            <rect y="5" width="12" height="2" rx="1" fill="currentColor" />
+          </svg>
+        </button>
+        <button id="btn-close" class="win-btn close" title="Close">
+          <svg width="12" height="12" viewBox="0 0 12 12">
+            <path d="M1 1L11 11M11 1L1 11" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Status Section -->
+    <div class="panel-section">
+      <div class="section-label">STATUS</div>
+      <div class="status-grid">
+        <div class="status-card" id="connection-card">
+          <div class="status-indicator" id="status-dot"></div>
+          <div class="status-info">
+            <span class="status-title" id="connection-status">Connecting…</span>
+            <span class="status-sub" id="server-address">ws://localhost:8765</span>
+          </div>
+        </div>
+        <div class="status-card">
+          <div class="peer-count-icon">👥</div>
+          <div class="status-info">
+            <span class="status-title">Peers Online</span>
+            <span class="status-sub peer-number" id="peer-count">0</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Connection Section -->
+    <div class="panel-section">
+      <div class="section-label">CONNECTION</div>
+      <div class="connection-mode">
+        <button id="btn-host" class="mode-btn active" title="Host the session">🖥️ Host</button>
+        <button id="btn-join" class="mode-btn" title="Join a session">🔗 Join</button>
+      </div>
+      <div id="host-info" class="connection-info">
+        <div class="info-label">Your IP (share with peer)</div>
+        <div class="ip-display" id="local-ip">Detecting…</div>
+      </div>
+      <div id="join-info" class="connection-info" style="display: none;">
+        <div class="info-label">Host IP Address</div>
+        <div class="ip-input-row">
+          <input type="text" id="host-ip-input" class="ip-input" placeholder="192.168.x.x" />
+          <button id="btn-connect" class="connect-btn">GO</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Controls Section -->
+    <div class="panel-section">
+      <div class="section-label">CONTROLS</div>
+
+      <button id="btn-click-through" class="control-btn">
+        <span class="btn-icon">🖱️</span>
+        <span class="btn-text">
+          <span class="btn-title">Click-Through</span>
+          <span class="btn-status" id="ct-status">OFF</span>
+        </span>
+        <span class="toggle-track" id="ct-toggle">
+          <span class="toggle-thumb"></span>
+        </span>
+      </button>
+
+      <button id="btn-remote-click" class="control-btn">
+        <span class="btn-icon">🎯</span>
+        <span class="btn-text">
+          <span class="btn-title">Remote Control</span>
+          <span class="btn-status" id="rc-status">OFF</span>
+        </span>
+        <span class="toggle-track" id="rc-toggle">
+          <span class="toggle-thumb"></span>
+        </span>
+      </button>
+
+      <button id="btn-screen-share" class="control-btn">
+        <span class="btn-icon">📺</span>
+        <span class="btn-text">
+          <span class="btn-title">Screen Share</span>
+          <span class="btn-status" id="ss-status">OFF</span>
+        </span>
+        <span class="toggle-track" id="ss-toggle">
+          <span class="toggle-thumb"></span>
+        </span>
+      </button>
+
+      <button id="btn-reconnect" class="control-btn">
+        <span class="btn-icon">🔄</span>
+        <span class="btn-text">
+          <span class="btn-title">Reconnect</span>
+          <span class="btn-status">WebSocket</span>
+        </span>
+      </button>
+    </div>
+
+    <!-- Cursor Legend -->
+    <div class="panel-section">
+      <div class="section-label">CURSORS</div>
+      <div class="legend-grid">
+        <div class="legend-item">
+          <div class="legend-dot local-dot"></div>
+          <span>Your Cursor</span>
+        </div>
+        <div class="legend-item">
+          <div class="legend-dot remote-dot"></div>
+          <span>Remote Peer</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Coordinates -->
+    <div class="panel-section">
+      <div class="section-label">COORDINATES</div>
+      <div class="coord-display">
+        <div class="coord-row">
+          <span class="coord-label local-accent">LOCAL</span>
+          <span class="coord-value" id="local-coords">0, 0</span>
+        </div>
+        <div class="coord-row">
+          <span class="coord-label remote-accent">REMOTE</span>
+          <span class="coord-value" id="remote-coords">—, —</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Shared Editor -->
+    <div class="panel-section editor-section">
+      <div class="section-header-row" id="editor-toggle-header">
+        <div class="section-label" style="margin-bottom: 0;">SHARED EDITOR</div>
+        <span class="editor-toggle-arrow" id="editor-arrow">▼</span>
+      </div>
+      <div id="editor-container" class="editor-container">
+        <textarea id="shared-editor" class="shared-editor"
+          placeholder="Type here… both peers can see and edit this text in real-time." spellcheck="false"></textarea>
+        <div class="editor-footer-bar">
+          <span class="char-count" id="char-count">0 chars</span>
+          <span class="sync-indicator" id="sync-indicator">●</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="panel-footer">
+      <span class="footer-text">Phantom Cursor v1.0</span>
+      <span class="footer-text dim">Pair Programming Overlay</span>
+    </div>
+  </aside>
+
+  <script src="renderer.js"></script>
+</body>
+
+</html>
