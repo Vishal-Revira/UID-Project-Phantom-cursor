@@ -2,13 +2,15 @@
 // main.js — Electron main process
 // Creates a frameless, transparent, always-on-top overlay window
 // and spawns a local WebSocket relay server on port 8765.
-// Supports remote click & keyboard simulation via koffi FFI (Windows).
+// Supports remote click & keyboard simulation on both Windows
+// (via koffi FFI) and macOS (via CoreGraphics through osascript).
 // Supports screen mirroring via desktopCapturer.
 // ─────────────────────────────────────────────────────────────
 
 const { app, BrowserWindow, ipcMain, screen, desktopCapturer } = require('electron');
 const path = require('path');
 const os = require('os');
+const { execFile, execSync } = require('child_process');
 const { WebSocketServer, WebSocket } = require('ws');
 
 let mainWindow = null;
@@ -17,7 +19,11 @@ let isClickThrough = false;
 let remoteClickEnabled = false;
 let screenShareEnabled = false;
 
-// ── Native Mouse & Keyboard Simulation (Windows only via koffi) ──
+// ══════════════════════════════════════════════════════════════
+// ── Cross-Platform Native Mouse & Keyboard Simulation ────────
+// ══════════════════════════════════════════════════════════════
+
+// ── Windows (koffi / user32.dll) ─────────────────────────────
 let SetCursorPos = null;
 let mouse_event = null;
 let keybd_event = null;
@@ -37,29 +43,107 @@ if (process.platform === 'win32') {
     SetCursorPos = user32.func('bool __stdcall SetCursorPos(int x, int y)');
     mouse_event = user32.func('void __stdcall mouse_event(uint32 dwFlags, uint32 dx, uint32 dy, uint32 dwData, uintptr dwExtraInfo)');
     keybd_event = user32.func('void __stdcall keybd_event(uint8 bVk, uint8 bScan, uint32 dwFlags, uintptr dwExtraInfo)');
-    console.log('[Native] koffi loaded — remote click & keyboard simulation available');
+    console.log('[Native] koffi loaded — Windows remote click & keyboard simulation available');
   } catch (err) {
     console.warn('[Native] Could not load koffi:', err.message);
   }
 }
 
+// ── macOS: check for Accessibility permission ────────────────
+let macAccessibilityGranted = false;
+if (process.platform === 'darwin') {
+  // On macOS, we use CoreGraphics CGEvent APIs through a tiny
+  // inline Objective-C helper compiled via osascript -l JavaScript
+  // or a Python bridge. We also need Accessibility permission.
+  console.log('[Native] macOS detected — using CoreGraphics for input simulation');
+  console.log('[Native] Make sure Phantom Cursor (or Electron) has Accessibility permission in System Preferences → Privacy & Security → Accessibility');
+  macAccessibilityGranted = true; // We'll try and report errors if it fails
+}
+
+// ── Unified simulateMouseClick ───────────────────────────────
 function simulateMouseClick(x, y, button = 'left') {
-  if (!SetCursorPos || !mouse_event) {
-    console.warn('[Native] Mouse simulation not available');
-    return false;
-  }
-  try {
-    SetCursorPos(Math.round(x), Math.round(y));
-    if (button === 'right') {
-      mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
-      mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
-    } else {
-      mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
-      mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+  const ix = Math.round(x);
+  const iy = Math.round(y);
+
+  if (process.platform === 'win32') {
+    // Windows path via koffi
+    if (!SetCursorPos || !mouse_event) {
+      console.warn('[Native] Windows mouse simulation not available (koffi not loaded)');
+      return false;
     }
-    return true;
-  } catch (err) {
-    console.error('[Native] Click simulation failed:', err.message);
+    try {
+      SetCursorPos(ix, iy);
+      if (button === 'right') {
+        mouse_event(MOUSEEVENTF_RIGHTDOWN, 0, 0, 0, 0);
+        mouse_event(MOUSEEVENTF_RIGHTUP, 0, 0, 0, 0);
+      } else {
+        mouse_event(MOUSEEVENTF_LEFTDOWN, 0, 0, 0, 0);
+        mouse_event(MOUSEEVENTF_LEFTUP, 0, 0, 0, 0);
+      }
+      return true;
+    } catch (err) {
+      console.error('[Native] Windows click simulation failed:', err.message);
+      return false;
+    }
+
+  } else if (process.platform === 'darwin') {
+    // macOS path via CoreGraphics (through Python/PyObjC bridge)
+    // Using osascript with JavaScript for Automation (JXA) won't work for
+    // low-level clicks. Instead we use a tiny Python script that calls
+    // Quartz CoreGraphics — Python + pyobjc ships with macOS.
+    try {
+      const pyScript = `
+import Quartz
+import time
+
+x = ${ix}
+y = ${iy}
+button = "${button}"
+
+point = Quartz.CGPointMake(x, y)
+
+if button == "right":
+    down_type = Quartz.kCGEventRightMouseDown
+    up_type = Quartz.kCGEventRightMouseUp
+    mouse_button = Quartz.kCGMouseButtonRight
+else:
+    down_type = Quartz.kCGEventLeftMouseDown
+    up_type = Quartz.kCGEventLeftMouseUp
+    mouse_button = Quartz.kCGMouseButtonLeft
+
+# Move the mouse to the target position first
+move = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, point, mouse_button)
+Quartz.CGEventPost(Quartz.kCGHIDEventTap, move)
+time.sleep(0.01)
+
+# Mouse down
+down = Quartz.CGEventCreateMouseEvent(None, down_type, point, mouse_button)
+Quartz.CGEventPost(Quartz.kCGHIDEventTap, down)
+time.sleep(0.01)
+
+# Mouse up
+up = Quartz.CGEventCreateMouseEvent(None, up_type, point, mouse_button)
+Quartz.CGEventPost(Quartz.kCGHIDEventTap, up)
+`;
+      // Fire and forget — use execFile for non-blocking
+      const child = execFile('/usr/bin/python3', ['-c', pyScript], { timeout: 3000 }, (err) => {
+        if (err) {
+          console.error('[Native] macOS click simulation failed:', err.message);
+          if (err.message.includes('Quartz') || err.message.includes('No module')) {
+            console.error('[Native] pyobjc may not be installed. Run: pip3 install pyobjc-framework-Quartz');
+          }
+        }
+      });
+      console.log(`[Native] macOS ${button} click at (${ix}, ${iy})`);
+      return true;
+    } catch (err) {
+      console.error('[Native] macOS click simulation failed:', err.message);
+      return false;
+    }
+
+  } else {
+    // Linux — could use xdotool, but not implemented yet
+    console.warn('[Native] Mouse simulation not available on this platform');
     return false;
   }
 }
@@ -119,24 +203,89 @@ const EXTENDED_KEYS = new Set([
   0x5B, 0x5C,             // Win keys
 ]);
 
+// ── macOS: JS keyboard code → macOS virtual key code mapping ─
+const MAC_KEYCODE_MAP = {
+  'KeyA': 0, 'KeyS': 1, 'KeyD': 2, 'KeyF': 3, 'KeyH': 4,
+  'KeyG': 5, 'KeyZ': 6, 'KeyX': 7, 'KeyC': 8, 'KeyV': 9,
+  'KeyB': 11, 'KeyQ': 12, 'KeyW': 13, 'KeyE': 14, 'KeyR': 15,
+  'KeyY': 16, 'KeyT': 17, 'KeyO': 31, 'KeyU': 32, 'KeyI': 34,
+  'KeyP': 35, 'KeyL': 37, 'KeyJ': 38, 'KeyK': 40, 'KeyN': 45,
+  'KeyM': 46,
+  'Digit1': 18, 'Digit2': 19, 'Digit3': 20, 'Digit4': 21,
+  'Digit5': 23, 'Digit6': 22, 'Digit7': 26, 'Digit8': 28,
+  'Digit9': 25, 'Digit0': 29,
+  'Enter': 36, 'NumpadEnter': 36, 'Tab': 48, 'Space': 49,
+  'Backspace': 51, 'Delete': 117, 'Escape': 53,
+  'ArrowUp': 126, 'ArrowDown': 125, 'ArrowLeft': 123, 'ArrowRight': 124,
+  'Home': 115, 'End': 119, 'PageUp': 116, 'PageDown': 121,
+  'F1': 122, 'F2': 120, 'F3': 99, 'F4': 118, 'F5': 96,
+  'F6': 97, 'F7': 98, 'F8': 100, 'F9': 101, 'F10': 109,
+  'F11': 103, 'F12': 111,
+  'ShiftLeft': 56, 'ShiftRight': 60,
+  'ControlLeft': 59, 'ControlRight': 62,
+  'AltLeft': 58, 'AltRight': 61,
+  'MetaLeft': 55, 'MetaRight': 54,
+  'Minus': 27, 'Equal': 24,
+  'BracketLeft': 33, 'BracketRight': 30,
+  'Backslash': 42, 'Semicolon': 41,
+  'Quote': 39, 'Backquote': 50,
+  'Comma': 43, 'Period': 47, 'Slash': 44,
+  'CapsLock': 57,
+};
+
+// ── Unified simulateKeypress ─────────────────────────────────
 function simulateKeypress(code, action) {
-  if (!keybd_event) {
-    console.warn('[Native] Keyboard simulation not available');
-    return false;
-  }
-  const vk = VK_MAP[code];
-  if (vk === undefined) {
-    console.warn(`[Native] Unknown key code: ${code}`);
-    return false;
-  }
-  try {
-    let flags = 0;
-    if (EXTENDED_KEYS.has(vk)) flags |= KEYEVENTF_EXTENDEDKEY;
-    if (action === 'up') flags |= KEYEVENTF_KEYUP;
-    keybd_event(vk, 0, flags, 0);
-    return true;
-  } catch (err) {
-    console.error('[Native] Keypress simulation failed:', err.message);
+  if (process.platform === 'win32') {
+    // Windows path
+    if (!keybd_event) {
+      console.warn('[Native] Windows keyboard simulation not available');
+      return false;
+    }
+    const vk = VK_MAP[code];
+    if (vk === undefined) {
+      console.warn(`[Native] Unknown key code: ${code}`);
+      return false;
+    }
+    try {
+      let flags = 0;
+      if (EXTENDED_KEYS.has(vk)) flags |= KEYEVENTF_EXTENDEDKEY;
+      if (action === 'up') flags |= KEYEVENTF_KEYUP;
+      keybd_event(vk, 0, flags, 0);
+      return true;
+    } catch (err) {
+      console.error('[Native] Windows keypress simulation failed:', err.message);
+      return false;
+    }
+
+  } else if (process.platform === 'darwin') {
+    // macOS path via CoreGraphics CGEventCreateKeyboardEvent
+    const macKeyCode = MAC_KEYCODE_MAP[code];
+    if (macKeyCode === undefined) {
+      console.warn(`[Native] Unknown macOS key code for: ${code}`);
+      return false;
+    }
+    const isDown = action === 'down' ? 'True' : 'False';
+    try {
+      const pyScript = `
+import Quartz
+key_code = ${macKeyCode}
+is_down = ${isDown}
+event = Quartz.CGEventCreateKeyboardEvent(None, key_code, is_down)
+Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+`;
+      execFile('/usr/bin/python3', ['-c', pyScript], { timeout: 2000 }, (err) => {
+        if (err) {
+          console.error('[Native] macOS keypress simulation failed:', err.message);
+        }
+      });
+      return true;
+    } catch (err) {
+      console.error('[Native] macOS keypress simulation failed:', err.message);
+      return false;
+    }
+
+  } else {
+    console.warn('[Native] Keyboard simulation not available on this platform');
     return false;
   }
 }
@@ -171,26 +320,12 @@ function createWebSocketServer() {
       try {
         const parsed = JSON.parse(message);
 
-        if (parsed.type === 'screenFrame') {
-          // Screen frames from host → send to ALL peers (non-host clients only)
-          wss.clients.forEach((client) => {
-            if (client !== hostWs && client.readyState === WebSocket.OPEN) {
-              client.send(message);
-            }
-          });
-          return; // Don't relay back to host
-        }
-
-        if (parsed.type === 'remoteKey' || parsed.type === 'click') {
-          // Remote input from peers → send ONLY to host
-          if (hostWs && hostWs.readyState === WebSocket.OPEN && ws !== hostWs) {
-            hostWs.send(message);
-          }
-          return;
-        }
-
-        if (parsed.type === 'screenShareStatus') {
-          // Broadcast screen share status to all peers
+        if (parsed.type === 'screenFrame' ||
+            parsed.type === 'remoteKey' ||
+            parsed.type === 'click' ||
+            parsed.type === 'screenShareStatus') {
+          // Bidirectional relay: send to ALL other connected clients
+          // This enables both host→peer and peer→host control
           wss.clients.forEach((client) => {
             if (client !== ws && client.readyState === WebSocket.OPEN) {
               client.send(message);
@@ -354,15 +489,24 @@ ipcMain.handle('simulate-click', (_event, x, y, button) => {
     console.log('[IPC] Remote click blocked — feature disabled');
     return false;
   }
-  // Convert window-relative coordinates to screen-absolute coordinates,
-  // accounting for Windows DPI scaling (e.g. 125%, 150%)
+  // Convert window-relative coordinates to screen-absolute coordinates
   if (mainWindow && !mainWindow.isDestroyed()) {
     const bounds = mainWindow.getBounds();
     const display = screen.getDisplayMatching(bounds);
-    const scaleFactor = display ? display.scaleFactor : 1;
-    const screenX = Math.round((x + bounds.x) * scaleFactor);
-    const screenY = Math.round((y + bounds.y) * scaleFactor);
-    console.log(`[IPC] Simulating ${button || 'left'} click at screen (${screenX}, ${screenY}) [window: ${x}, ${y}, scale: ${scaleFactor}]`);
+
+    let screenX, screenY;
+    if (process.platform === 'win32') {
+      // Windows: user32.dll APIs need physical pixel coordinates (with DPI scaling)
+      const scaleFactor = display ? display.scaleFactor : 1;
+      screenX = Math.round((x + bounds.x) * scaleFactor);
+      screenY = Math.round((y + bounds.y) * scaleFactor);
+    } else {
+      // macOS: CoreGraphics uses logical point coordinates (no scaling needed)
+      screenX = Math.round(x + bounds.x);
+      screenY = Math.round(y + bounds.y);
+    }
+
+    console.log(`[IPC] Simulating ${button || 'left'} click at screen (${screenX}, ${screenY}) [window: ${x}, ${y}]`);
     return simulateMouseClick(screenX, screenY, button || 'left');
   }
   return false;
@@ -419,9 +563,19 @@ ipcMain.handle('simulate-screen-click', (_event, screenXNorm, screenYNorm, butto
   // screenXNorm and screenYNorm are 0-1 normalized coordinates
   const primaryDisplay = screen.getPrimaryDisplay();
   const { width, height } = primaryDisplay.size;
-  const scaleFactor = primaryDisplay.scaleFactor || 1;
-  const screenX = Math.round(screenXNorm * width * scaleFactor);
-  const screenY = Math.round(screenYNorm * height * scaleFactor);
+
+  let screenX, screenY;
+  if (process.platform === 'win32') {
+    // Windows: user32 APIs need physical pixel coordinates
+    const scaleFactor = primaryDisplay.scaleFactor || 1;
+    screenX = Math.round(screenXNorm * width * scaleFactor);
+    screenY = Math.round(screenYNorm * height * scaleFactor);
+  } else {
+    // macOS: CoreGraphics uses logical point coordinates
+    screenX = Math.round(screenXNorm * width);
+    screenY = Math.round(screenYNorm * height);
+  }
+
   console.log(`[IPC] Simulating screen click at (${screenX}, ${screenY}) from normalized (${screenXNorm.toFixed(3)}, ${screenYNorm.toFixed(3)})`);
   return simulateMouseClick(screenX, screenY, button || 'left');
 });

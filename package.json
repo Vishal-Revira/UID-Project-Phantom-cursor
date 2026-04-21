@@ -19,7 +19,9 @@
     "electron": "^35.0.0"
   },
   "dependencies": {
-    "koffi": "^2.16.1",
     "ws": "^8.18.0"
+  },
+  "optionalDependencies": {
+    "koffi": "^2.16.1"
   }
 }

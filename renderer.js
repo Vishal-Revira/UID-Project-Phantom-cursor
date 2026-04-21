@@ -114,11 +114,13 @@
     localCursor.style.opacity = '0';
   });
 
-  // ── Remote Click — Send click from peer ────────────────
+  // ── Remote Click — Send click to other side ────────────
+  // Works in BOTH host and peer mode — if the screen mirror is
+  // visible, clicks on it are sent as normalized screen coordinates.
   canvasOverlay.addEventListener('click', (e) => {
     if (ws && ws.readyState === WebSocket.OPEN) {
-      // If peer mode and screen mirror is visible, send normalized coords
-      if (!isHostMode && screenMirror.style.display !== 'none') {
+      // If screen mirror is visible, send normalized coords relative to it
+      if (screenMirror.style.display !== 'none') {
         const rect = screenMirror.getBoundingClientRect();
         const xNorm = (e.clientX - rect.left) / rect.width;
         const yNorm = (e.clientY - rect.top) / rect.height;
@@ -135,8 +137,8 @@
       }
       ws.send(JSON.stringify({
         type: 'click',
-        x: e.clientX,
-        y: e.clientY,
+        xNorm: e.clientX / window.innerWidth,
+        yNorm: e.clientY / window.innerHeight,
         button: 'left',
       }));
     }
@@ -145,7 +147,7 @@
   canvasOverlay.addEventListener('contextmenu', (e) => {
     e.preventDefault();
     if (ws && ws.readyState === WebSocket.OPEN) {
-      if (!isHostMode && screenMirror.style.display !== 'none') {
+      if (screenMirror.style.display !== 'none') {
         const rect = screenMirror.getBoundingClientRect();
         const xNorm = (e.clientX - rect.left) / rect.width;
         const yNorm = (e.clientY - rect.top) / rect.height;
@@ -162,8 +164,8 @@
       }
       ws.send(JSON.stringify({
         type: 'click',
-        x: e.clientX,
-        y: e.clientY,
+        xNorm: e.clientX / window.innerWidth,
+        yNorm: e.clientY / window.innerHeight,
         button: 'right',
       }));
     }
@@ -232,34 +234,44 @@
         const data = JSON.parse(event.data);
 
         if (data.type === 'cursor') {
-          updateRemoteCursor(data.x, data.y);
+          let rx = data.x;
+          let ry = data.y;
+          if (data.xNorm !== undefined && data.yNorm !== undefined) {
+            rx = data.xNorm * window.innerWidth;
+            ry = data.yNorm * window.innerHeight;
+          }
+          updateRemoteCursor(rx, ry);
 
         } else if (data.type === 'click') {
-          if (isHostMode) {
-            // Host receives click from peer
-            showClickRipple(data.x || 0, data.y || 0);
-            if (remoteClickEnabled) {
-              if (data.isScreenClick) {
-                // Normalized screen coordinates
-                window.phantomAPI.simulateScreenClick(data.xNorm, data.yNorm, data.button || 'left');
-              } else {
-                window.phantomAPI.simulateClick(data.x, data.y, data.button || 'left');
-              }
+          // Bidirectional: BOTH host and peer can receive and simulate clicks
+          let cx = data.x;
+          let cy = data.y;
+          if (data.xNorm !== undefined && data.yNorm !== undefined && !data.isScreenClick) {
+            cx = data.xNorm * window.innerWidth;
+            cy = data.yNorm * window.innerHeight;
+          }
+
+          showClickRipple(cx || 0, cy || 0);
+          if (remoteClickEnabled) {
+            if (data.isScreenClick) {
+              // Normalized screen coordinates — simulate at absolute screen position
+              window.phantomAPI.simulateScreenClick(data.xNorm, data.yNorm, data.button || 'left');
+            } else {
+              window.phantomAPI.simulateClick(cx, cy, data.button || 'left');
             }
-          } else {
-            // Peer mode — just show ripple
-            showClickRipple(data.x || 0, data.y || 0);
           }
 
         } else if (data.type === 'remoteKey') {
-          // Host receives keyboard input from peer
-          if (isHostMode && remoteClickEnabled) {
+          // Bidirectional: BOTH host and peer can receive and simulate keystrokes
+          if (remoteClickEnabled) {
             window.phantomAPI.simulateKeypress(data.code, data.action);
           }
 
         } else if (data.type === 'screenFrame') {
-          // Peer receives screen frame from host
-          if (!isHostMode) {
+          // Bidirectional: BOTH host and peer can receive screen frames
+          // (Don't display our own frames — only the other side's)
+          if (!screenShareEnabled) {
+            // We're not sharing, so this frame is from the other side
             screenMirror.src = data.data;
             if (screenMirror.style.display === 'none') {
               screenMirror.style.display = 'block';
@@ -269,16 +281,14 @@
           }
 
         } else if (data.type === 'screenShareStatus') {
-          // Peer learns screen share state changed
-          if (!isHostMode) {
-            if (data.active) {
-              screenMirrorContainer.classList.add('active');
-              liveBadge.style.display = 'flex';
-            } else {
-              screenMirror.style.display = 'none';
-              screenMirrorContainer.classList.remove('active');
-              liveBadge.style.display = 'none';
-            }
+          // The other side's screen share state changed
+          if (data.active) {
+            screenMirrorContainer.classList.add('active');
+            liveBadge.style.display = 'flex';
+          } else {
+            screenMirror.style.display = 'none';
+            screenMirrorContainer.classList.remove('active');
+            liveBadge.style.display = 'none';
           }
 
         } else if (data.type === 'editor') {
@@ -290,11 +300,9 @@
 
         } else if (data.type === 'leave') {
           hideRemoteCursor();
-          if (!isHostMode) {
-            screenMirror.style.display = 'none';
-            screenMirrorContainer.classList.remove('active');
-            liveBadge.style.display = 'none';
-          }
+          screenMirror.style.display = 'none';
+          screenMirrorContainer.classList.remove('active');
+          liveBadge.style.display = 'none';
         }
       } catch (err) {
         console.warn('[WS] Failed to parse message:', err);
@@ -316,7 +324,9 @@
 
   function sendCursorPosition(x, y) {
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'cursor', x, y }));
+      const xNorm = x / window.innerWidth;
+      const yNorm = y / window.innerHeight;
+      ws.send(JSON.stringify({ type: 'cursor', xNorm, yNorm }));
     }
   }
 
@@ -452,8 +462,9 @@
     console.log('[Screen] Capture stopped');
   }
 
-  // ── Remote Keyboard Capture (Peer Mode) ────────────────
-  // When the peer presses keys while the canvas is focused, relay to host
+  // ── Remote Keyboard Capture (Both Modes) ───────────────
+  // When keys are pressed while viewing the other side's screen,
+  // relay them to the other side for simulation.
   function handlePeerKeyDown(e) {
     // Don't capture if typing in an input or the shared editor
     if (document.activeElement === sharedEditor ||
@@ -470,7 +481,8 @@
     // Don't capture Escape
     if (e.key === 'Escape') return;
 
-    if (!isHostMode && ws && ws.readyState === WebSocket.OPEN && screenMirror.style.display !== 'none') {
+    // Send key to other side when we're viewing their screen mirror
+    if (ws && ws.readyState === WebSocket.OPEN && screenMirror.style.display !== 'none') {
       e.preventDefault();
       e.stopPropagation();
       ws.send(JSON.stringify({
@@ -493,7 +505,8 @@
       return;
     }
 
-    if (!isHostMode && ws && ws.readyState === WebSocket.OPEN && screenMirror.style.display !== 'none') {
+    // Send key to other side when we're viewing their screen mirror
+    if (ws && ws.readyState === WebSocket.OPEN && screenMirror.style.display !== 'none') {
       e.preventDefault();
       e.stopPropagation();
       ws.send(JSON.stringify({
@@ -590,14 +603,14 @@
     rcToggle.classList.toggle('active', remoteClickEnabled);
   });
 
-  // ── Screen Share Toggle ────────────────────────────────
+  // ── Screen Share Toggle (Both Modes) ───────────────────
   btnScreenShare.addEventListener('click', async () => {
     const newState = await window.phantomAPI.toggleScreenShare();
     screenShareEnabled = newState;
     ssStatusEl.textContent = screenShareEnabled ? 'ON' : 'OFF';
     ssToggle.classList.toggle('active', screenShareEnabled);
 
-    if (screenShareEnabled && isHostMode) {
+    if (screenShareEnabled) {
       await startScreenCapture();
     } else {
       stopScreenCapture();
@@ -632,12 +645,12 @@
     joinInfo.style.display = 'none';
     serverAddress = 'ws://localhost:8765';
 
-    // Hide screen mirror (host doesn't need it)
+    // Reset screen mirror (will show when the other side shares)
     screenMirror.style.display = 'none';
     screenMirrorContainer.classList.remove('active');
     liveBadge.style.display = 'none';
 
-    // Show screen share button (host only)
+    // Screen share is available in both modes
     btnScreenShare.style.display = '';
 
     connectWebSocket();
@@ -655,8 +668,8 @@
       stopScreenCapture();
     }
 
-    // Hide screen share toggle for peers (host controls this)
-    btnScreenShare.style.display = 'none';
+    // Screen share is available in both modes
+    btnScreenShare.style.display = '';
   });
 
   btnConnect.addEventListener('click', () => {
@@ -704,10 +717,10 @@
       e.preventDefault();
       btnRemoteClick.click();
     }
-    // Ctrl+Shift+S — toggle screen share (host only)
+    // Ctrl+Shift+S — toggle screen share (both modes)
     if (e.ctrlKey && e.shiftKey && e.key === 'S') {
       e.preventDefault();
-      if (isHostMode) btnScreenShare.click();
+      btnScreenShare.click();
     }
     // Escape — close app (only if editor not focused)
     if (e.key === 'Escape' && document.activeElement !== sharedEditor) {
